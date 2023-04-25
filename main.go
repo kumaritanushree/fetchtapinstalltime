@@ -1,12 +1,13 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"time"
 
-	cmdcore "github.com/vmware-tanzu/carvel-kapp-controller/cli/pkg/kctrl/cmd/core"
 	kcv1alpha1 "github.com/vmware-tanzu/carvel-kapp-controller/pkg/apis/kappctrl/v1alpha1"
 	"github.com/vmware-tanzu/carvel-kapp-controller/pkg/client/clientset/versioned"
 	kcexternalversions "github.com/vmware-tanzu/carvel-kapp-controller/pkg/client/informers/externalversions"
@@ -20,7 +21,7 @@ var appList = []string{"accelerator", "api-auto-registration", "api-portal", "ap
 	"appsso", "bitnami-services", "buildservice", "cartographer", "cert-manager", "cnrs", "contour", "crossplane", "developer-conventions", "eventing",
 	"fluxcd-source-controller", "grype", "learningcenter", "learningcenter-workshops", "metadata-store", "namespace-provisioner", "ootb-delivery-basic",
 	"ootb-supply-chain-basic", "ootb-templates", "policy-controller", "scanning", "service-bindings", "services-toolkit", "source-controller", "spring-boot-conventions",
-	"tap", "tap-auth", "tap-gui"}
+	"tap", "tap-auth", "tap-gui", "tap-telemetry", "tekton-pipelines"}
 
 type appDetails struct {
 	name          string
@@ -37,6 +38,16 @@ type result struct {
 
 var installationDetail = result{
 	detail: make(map[string]appDetails),
+}
+
+type handler struct {
+	stopperChan chan struct{}
+	watchError  error
+}
+
+type AppStatusDiff struct {
+	old kcv1alpha1.AppStatus
+	new kcv1alpha1.AppStatus
 }
 
 func main() {
@@ -60,16 +71,7 @@ func main() {
 		go sharedInformer(clientset, appName, wg)
 	}
 	wg.Wait()
-	installationDetail.lock.Lock()
-	fmt.Printf("\nResult-final: %+v\n", installationDetail.detail)
-	installationDetail.lock.Unlock()
-}
-
-type handler struct {
-	stopperChan          chan struct{}
-	watchError           error
-	lastSeenDeployStdout string
-	statusUI             cmdcore.StatusLoggingUI
+	writeIntoCSV()
 }
 
 func sharedInformer(clientset *versioned.Clientset, appName string, wg *sync.WaitGroup) {
@@ -103,12 +105,6 @@ func sharedInformer(clientset *versioned.Clientset, appName string, wg *sync.Wai
 	}
 }
 
-type AppStatusDiff struct {
-	old                  kcv1alpha1.AppStatus
-	new                  kcv1alpha1.AppStatus
-	lastSeenDeployStdout string
-}
-
 func (h *handler) udpateEventHandler(oldObj interface{}, newObj interface{}) {
 
 	newApp, _ := newObj.(*kcv1alpha1.App)
@@ -128,7 +124,6 @@ func (h *handler) udpateEventHandler(oldObj interface{}, newObj interface{}) {
 
 		}
 	}
-	//fmt.Printf("\nResult: %+v\n", installationDetail.detail)
 
 	appStatus := AppStatusDiff{
 		old: oldApp.Status,
@@ -220,4 +215,29 @@ func IsDeleting(status kcv1alpha1.AppStatus) bool {
 		}
 	}
 	return false
+}
+
+func writeIntoCSV() {
+	file, err := os.Create("records.csv") // later we can change it to take user input
+	defer file.Close()
+	if err != nil {
+		log.Fatalln("failed to open file", err)
+	}
+	w := csv.NewWriter(file)
+	defer w.Flush()
+
+	row := []string{"AppName", "CreationTimestamp", "FetchStartedAt", "DataCollectedAt"}
+	if err := w.Write(row); err != nil {
+		log.Fatalln("error writing record to file", err)
+	}
+
+	installationDetail.lock.Lock()
+	defer installationDetail.lock.Unlock()
+	for _, record := range installationDetail.detail {
+		row := []string{record.name, record.creationTime, record.fetchTime, record.collectedTime}
+		if err := w.Write(row); err != nil {
+			log.Fatalln("error writing record to file", err)
+		}
+	}
+
 }
